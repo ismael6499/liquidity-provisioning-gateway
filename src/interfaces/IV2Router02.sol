@@ -11,4 +11,5 @@ interface IV2Router02 {
         uint deadline
     ) external returns (uint[] memory amounts);
     
+    function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts);
 }
