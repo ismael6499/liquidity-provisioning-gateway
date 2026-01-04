@@ -1,66 +1,40 @@
-## Foundry
+# ⚡ Smart Router Core: Best Execution Aggregator
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+A gas-optimized DEX aggregation protocol that routes trades across multiple liquidity sources (Uniswap V2, SushiSwap, etc.) to guarantee the best price execution for users.
 
-Foundry consists of:
+## 🚀 Engineering Context
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+As a **Java Software Engineer**, handling high availability typically involves a Load Balancer (like NGINX) distributing traffic across healthy microservices. If one service fails, the balancer detects it and reroutes requests.
 
-## Documentation
+In **DeFi**, liquidity is fragmented across multiple protocols. This project implements an on-chain **Smart Order Router (SOR)**. Unlike a standard swap, this contract queries multiple endpoints (Routers) dynamically. Crucially, it implements a **Circuit Breaker** pattern using Solidity's `try/catch` syntax: if one liquidity source is down or reverts, the protocol seamlessly skips it and continues execution, ensuring the user's transaction never fails due to third-party instability.
 
-https://book.getfoundry.sh/
+## 💡 Project Overview
 
-## Usage
+**Smart Router Core** acts as a proxy execution layer. It accepts a user's trade intent, queries a whitelist of on-chain routers, and executes the swap via the provider offering the highest output amount.
 
-### Build
+### 🔍 Key Technical Features:
 
-```shell
-$ forge build
-```
+* **Fault-Tolerant Routing (`try/catch`):**
+    * **Architecture:** The `getBestQuote` function iterates through external contracts.
+    * **Resilience:** Instead of allowing a single reverting router to bubble up an exception and revert the entire transaction, I handled external calls with low-level `try/catch` blocks. This ensures 100% uptime for the aggregator even if a connected DEX suffers an outage.
 
-### Test
+* **Dynamic Whitelisting & Storage Optimization:**
+    * **Data Structures:** Implemented an array with an auxiliary mapping (`O(1)` lookups) for router management.
+    * **Gas Efficiency:** Used the "Swap-and-Pop" idiom in `removeRouter` to delete elements from the array without leaving gaps or shifting elements (saving significant gas on admin operations).
 
-```shell
-$ forge test
-```
+* **Arbitrum Mainnet Fork Testing:**
+    * **Methodology:** The test suite does not run on a blank chain. It forks the **Arbitrum Mainnet** state to test against *real* deployed liquidity pools (Uniswap, SushiSwap) and real tokens (USDT, DAI), validating the integration in a production-mirror environment.
 
-### Format
+* **Fuzzing & Invariants:**
+    * Extensive usage of Foundry's `testFuzz` to validate fee calculations and solvency invariants across random input amounts and boundary conditions.
 
-```shell
-$ forge fmt
-```
+## 🛠️ Stack & Tools
 
-### Gas Snapshots
+* **Language:** Solidity `0.8.24`.
+* **Framework:** Foundry (Forge).
+    * *Highlights:* Mainnet Forking, Fuzz Testing, Mocking.
+* **Network Target:** EVM Compatible (Tested on Arbitrum One).
 
-```shell
-$ forge snapshot
-```
+---
 
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+*This repository contains the settlement and routing logic for decentralized trading execution.*
