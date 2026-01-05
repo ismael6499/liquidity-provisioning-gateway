@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import "../src/SwapApp.sol";
+import "../src/interfaces/IV2Factory.sol";
 import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
 contract SwapAppTest is Test {
@@ -216,9 +217,6 @@ contract SwapAppTest is Test {
     }
 
     function test_RevertIf_NoValidRouter_Or_InsufficientOutput() public {
-        address fakeRouter = address(0x123);
-        // We can't really force 'getBestQuote' to fail completely unless we remove ALL routers.
-        
         swapApp.removeRouter(routerAddress); // Remove Uniswap
         
         uint256 amountIn = 100 * 1e6;
@@ -321,11 +319,220 @@ contract SwapAppTest is Test {
         assertEq(IERC20(USDT).balanceOf(address(swapApp)), expectedFee, "Contract should hold variable fee");
         assertEq(IERC20(USDT).balanceOf(user), 0, "User should have spent everything");
     }
+
+    // --- Add Liquidity Tests ---
+
+    event AddLiquidity(address indexed tokenA, address indexed tokenB, uint256 amountA, uint256 amountB, uint256 lpTokensAmount);
+
+    function test_AddLiquidity_WhenInputsAreValid_ShouldEmitEventAndTransferTokens() public {
+        uint256 amountIn = 10 * 1e6; // 10 USDT
+        deal(USDT, user, amountIn);
+        
+        vm.startPrank(user);
+        address[] memory path = new address[](2);
+        path[0] = USDT;
+        path[1] = DAI;
+        
+        uint256 deadline = block.timestamp + 1 minutes;
+        IERC20(USDT).approve(address(swapApp), amountIn);
+
+        // Expect AddLiquidity event
+        vm.expectEmit(true, true, false, false);
+        emit AddLiquidity(USDT, DAI, 0, 0, 0); // We check topics, amounts can vary slightly
+
+        swapApp.addLiquidity(amountIn, 0, path, 0, 0, deadline);
+        
+        uint256 usdtBalanceAfter = IERC20(USDT).balanceOf(user);
+        assertEq(usdtBalanceAfter, 0, "All USDT should be spent");
+
+        // Note: verifying exact LP token balance would require finding the pair address, 
+        // which varies by router. The event emission confirms success.
+        vm.stopPrank();
+    }
+
+    function test_AddLiquidity_WithAmountOutMin() public {
+        uint256 amountIn = 100 * 1e6; // 100 USDT
+        deal(USDT, user, amountIn);
+        
+        vm.startPrank(user);
+        address[] memory path = new address[](2);
+        path[0] = USDT;
+        path[1] = DAI;
+
+        // Get a quote for 100 USDT (total) -> DAI
+        (, uint256 quoteOut) = swapApp.getBestQuote(amountIn, path);
+        // Set amountOutMin to 90% of the total quote.
+        // The contract should divide this by 2 (45% of total) and pass it to the 50% swap.
+        uint256 amountOutMin = (quoteOut * 90) / 100;
+
+        IERC20(USDT).approve(address(swapApp), amountIn);
+        swapApp.addLiquidity(amountIn, amountOutMin, path, 0, 0, block.timestamp + 1 minutes);
+        
+        assertEq(IERC20(USDT).balanceOf(user), 0);
+        vm.stopPrank();
+    }
+
+    function test_AddLiquidity_WhenFeeIsActive_ShouldDeductFee() public {
+        uint256 feeBps = 100; // 1%
+        swapApp.setFee(feeBps);
+
+        uint256 amountIn = 100 * 1e6; // 100 USDT
+        uint256 expectedFee = 1 * 1e6; // 1 USDT
+        
+        deal(USDT, user, amountIn);
+        
+        vm.startPrank(user);
+        address[] memory path = new address[](2);
+        path[0] = USDT;
+        path[1] = DAI;
+        
+        IERC20(USDT).approve(address(swapApp), amountIn);
+        swapApp.addLiquidity(amountIn, 0, path, 0, 0, block.timestamp + 1 minutes);
+        vm.stopPrank();
+
+        // Check if fee remained in contract (plus possible dust from LP)
+        assertGe(IERC20(USDT).balanceOf(address(swapApp)), expectedFee, "Contract should hold at least the fee");
+    }
+
+    function test_RevertIf_AddLiquidity_WhenPaused() public {
+        swapApp.togglePause();
+        
+        vm.startPrank(user);
+        uint256 amountIn = 5 * 1e6;
+        deal(USDT, user, amountIn);
+        IERC20(USDT).approve(address(swapApp), amountIn);
+        
+        address[] memory path = new address[](2);
+        path[0] = USDT;
+        path[1] = DAI;
+
+        vm.expectRevert(); // EnforcedPause()
+        swapApp.addLiquidity(amountIn, 0, path, 0, 0, block.timestamp);
+        vm.stopPrank();
+    }
+
+    function testFuzz_AddLiquidity_WithRandomAmounts(uint256 amountIn) public {
+        // Bound amountIn between 10 USDT and 50,000 USDT
+        amountIn = bound(amountIn, 10 * 1e6, 50_000 * 1e6);
+        
+        deal(USDT, user, amountIn);
+        
+        vm.startPrank(user);
+        address[] memory path = new address[](2);
+        path[0] = USDT;
+        path[1] = DAI;
+        
+        IERC20(USDT).approve(address(swapApp), amountIn);
+        swapApp.addLiquidity(amountIn, 0, path, 0, 0, block.timestamp + 1 minutes);
+        vm.stopPrank();
+
+        uint256 feeBps = swapApp.feeBasisPoints();
+        uint256 expectedFee = (amountIn * feeBps) / 10000;
+        
+        assertGe(IERC20(USDT).balanceOf(address(swapApp)), expectedFee, "Contract should hold the fee");
+        assertEq(IERC20(USDT).balanceOf(user), 0, "User USDT balance should be 0");
+    }
+
+    function testFuzz_AddLiquidity_WithRandomFeesAndAmounts(uint256 amountIn, uint256 feeBps) public {
+        amountIn = bound(amountIn, 10 * 1e6, 50_000 * 1e6);
+        feeBps = bound(feeBps, 0, 500);
+        
+        swapApp.setFee(feeBps);
+        deal(USDT, user, amountIn);
+        
+        vm.startPrank(user);
+        address[] memory path = new address[](2);
+        path[0] = USDT;
+        path[1] = DAI;
+        
+        IERC20(USDT).approve(address(swapApp), amountIn);
+        swapApp.addLiquidity(amountIn, 0, path, 0, 0, block.timestamp + 1 minutes);
+        vm.stopPrank();
+
+        uint256 expectedFee = (amountIn * feeBps) / 10000;
+        
+        assertGe(IERC20(USDT).balanceOf(address(swapApp)), expectedFee, "Contract should hold variable fee");
+        assertEq(IERC20(USDT).balanceOf(user), 0, "User should have spent everything");
+    }
+
+    // --- Remove Liquidity Tests ---
+
+    function test_RemoveLiquidity_ShouldWork() public {
+        uint256 amountIn = 100 * 1e6; // 100 USDT
+        deal(USDT, user, amountIn);
+        
+        vm.startPrank(user);
+        address[] memory path = new address[](2);
+        path[0] = USDT;
+        path[1] = DAI;
+
+        // 1. Add Liquidity first to get LP Tokens
+        IERC20(USDT).approve(address(swapApp), amountIn);
+        swapApp.addLiquidity(amountIn, 0, path, 0, 0, block.timestamp + 1 minutes);
+
+        // 2. Find LP Token address to check balance
+        address factory = IV2Router02(routerAddress).factory();
+        address lpToken = IV2Factory(factory).getPair(USDT, DAI);
+        uint256 lpBalance = IERC20(lpToken).balanceOf(user);
+        assertGt(lpBalance, 0, "User should have LP tokens");
+
+        // 3. Remove Liquidity
+        IERC20(lpToken).approve(address(swapApp), lpBalance);
+        swapApp.removeLiquidity(USDT, DAI, lpBalance, 0, 0, user, block.timestamp + 1 minutes);
+        
+        assertEq(IERC20(lpToken).balanceOf(user), 0, "LP tokens should be spent");
+        assertGt(IERC20(USDT).balanceOf(user), 0, "User should get USDT back");
+        assertGt(IERC20(DAI).balanceOf(user), 0, "User should get DAI back");
+        vm.stopPrank();
+    }
+
+    function test_RevertIf_RemoveLiquidity_WhenPaused() public {
+        swapApp.togglePause();
+        vm.startPrank(user);
+        vm.expectRevert(); // EnforcedPause()
+        swapApp.removeLiquidity(USDT, DAI, 100, 0, 0, user, block.timestamp);
+        vm.stopPrank();
+    }
+
+    function test_RevertIf_RemoveLiquidity_PairDoesNotExist() public {
+        address fakeToken = address(0x999);
+        vm.startPrank(user);
+        // This will revert because IV2Factory(factory).getPair returns address(0)
+        // or getBestQuote fails if no router supports the pair.
+        vm.expectRevert(); 
+        swapApp.removeLiquidity(USDT, fakeToken, 100, 0, 0, user, block.timestamp);
+        vm.stopPrank();
+    }
+
+    function testFuzz_RemoveLiquidity_WithRandomAmounts(uint256 amountIn) public {
+        amountIn = bound(amountIn, 10 * 1e6, 10_000 * 1e6);
+        deal(USDT, user, amountIn);
+        
+        vm.startPrank(user);
+        address[] memory path = new address[](2);
+        path[0] = USDT;
+        path[1] = DAI;
+
+        // 1. Add Liquidity
+        IERC20(USDT).approve(address(swapApp), amountIn);
+        swapApp.addLiquidity(amountIn, 0, path, 0, 0, block.timestamp + 1 minutes);
+
+        // 2. Get LP Balance
+        address factory = IV2Router02(routerAddress).factory();
+        address lpToken = IV2Factory(factory).getPair(USDT, DAI);
+        uint256 lpBalance = IERC20(lpToken).balanceOf(user);
+
+        // 3. Remove Liquidity
+        IERC20(lpToken).approve(address(swapApp), lpBalance);
+        swapApp.removeLiquidity(USDT, DAI, lpBalance, 0, 0, user, block.timestamp + 1 minutes);
+        
+        assertLe(IERC20(lpToken).balanceOf(user), 1, "LP tokens should be spent (allow 1 wei for rounding)");
+        vm.stopPrank();
+    }
 }
 
 contract MockBadRouter {
     function getAmountsOut(uint amountIn, address[] calldata path) external pure returns (uint[] memory amounts) {
         revert("I always fail");
     }
-    function swapExactTokensForTokens(uint, uint, address[] calldata, address, uint) external returns (uint[] memory) {}
 }
